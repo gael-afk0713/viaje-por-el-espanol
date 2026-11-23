@@ -1,0 +1,9 @@
+# Godot 4+
+.godot/
+/android/
+
+# exportações locais (o .exe vai nas Releases do GitHub)
+build/
+
+# ferramentas
+.impeccable/
