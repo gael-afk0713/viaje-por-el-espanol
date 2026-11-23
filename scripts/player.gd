@@ -8,12 +8,19 @@ signal died
 signal hp_changed
 
 const MAX_HP := 3
-const ATTACK_TIME := 0.34      # duração do golpe de espada
-const ATTACK_ACTIVE := 0.2     # janela em que o golpe acerta
+const ATTACK_TIME := 0.36      # duração do golpe de espada
+const HIT_FROM := 0.2          # o golpe acerta entre estas frações do tempo
+const HIT_TO := 0.72           # (a espada descendo na frente do personagem)
 const ATTACK_COOLDOWN := 0.4
 const ATTACK_REACH := 2.2
 
 const Character = preload("res://scripts/character.gd")
+const Sword = preload("res://scripts/sword.gd")
+const SwordSwing = preload("res://scripts/sword_swing.gd")
+## Centro do punho direito, no espaço do osso "arm-right" (medido nos vértices da mão).
+const HAND_POS := Vector3(-0.262, 0.0, 0.03)
+## Ombro direito no espaço do personagem (virado para +X), para o rastro do golpe.
+const SLASH_SHOULDER := Vector3(0.0, 0.68, 0.32)
 
 const SPEED := 7.5
 const ACCEL_GROUND := 60.0
@@ -41,6 +48,7 @@ var attack_id := 0            # muda a cada golpe (cada monstro só leva 1 dano 
 var _attack_t := 0.0
 var _attack_cd := 0.0
 var _slash: MeshInstance3D
+var _swing: Node = null
 var _slash_mat: StandardMaterial3D
 
 
@@ -61,7 +69,8 @@ func _ready() -> void:
 	_build_blob_shadow()
 
 
-## Espada simples (lâmina, guarda e cabo) presa na mão direita do personagem.
+## Espada longa (scripts/sword.gd) presa na MÃO direita: o cabo atravessa o punho
+## e a lâmina aponta para a frente. O golpe é feito por scripts/sword_swing.gd.
 func _build_sword() -> void:
 	var sk: Skeleton3D = visual.find_children("*", "Skeleton3D", true, false).front()
 	if sk == null or sk.find_bone("arm-right") < 0:
@@ -69,57 +78,28 @@ func _build_sword() -> void:
 	var att := BoneAttachment3D.new()
 	att.bone_name = "arm-right"
 	sk.add_child(att)
-	var sword := Node3D.new()
-	# o personagem é escalado 2,3x; a espada fica no tamanho certo dentro dessa escala
-	sword.position = Vector3(0.0, -0.17, 0.05)
-	sword.rotation_degrees = Vector3(90, 0, 0)
+	var sword := Sword.build()
+	# o esqueleto está escalado (Character.MODEL_SCALE); a espada é medida em metros de mundo
+	sword.scale = Vector3.ONE / Character.MODEL_SCALE
+	sword.position = HAND_POS
+	sword.rotation_degrees = Vector3(90, 0, 0)   # +Y da espada = para a frente do punho
 	att.add_child(sword)
-	var parts := [
-		[Vector3(0.07, 0.4, 0.02), Vector3(0, 0.26, 0), Color("#dfe6ee"), 0.25],
-		[Vector3(0.2, 0.045, 0.05), Vector3(0, 0.05, 0), Color("#c8962e"), 0.4],
-		[Vector3(0.035, 0.1, 0.035), Vector3(0, -0.01, 0), Color("#5a3a22"), 0.9],
-	]
-	for p in parts:
-		var mi := MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = p[0]
-		mi.mesh = bm
-		var m := StandardMaterial3D.new()
-		m.albedo_color = p[2]
-		m.metallic = 0.6 if p[3] < 0.5 else 0.0
-		m.roughness = p[3]
-		mi.material_override = m
-		mi.position = p[1]
-		sword.add_child(mi)
+	_swing = SwordSwing.new()
+	sk.add_child(_swing)
 
 
-## Rastro do golpe: um arco claro na frente do personagem que aparece e some.
+## Rastro do golpe: uma faixa clara que segue o caminho da ponta da espada
+## (desenhada de novo a cada quadro, só durante a descida da lâmina).
 func _build_slash() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var seg := 14
-	for i in seg:
-		var a0 := lerpf(-1.1, 1.25, float(i) / seg)
-		var a1 := lerpf(-1.1, 1.25, float(i + 1) / seg)
-		var w0 := sin(float(i) / seg * PI)
-		var w1 := sin(float(i + 1) / seg * PI)
-		var p := [
-			Vector3(cos(a0), sin(a0), 0) * 1.55, Vector3(cos(a0), sin(a0), 0) * (1.55 - 0.55 * w0),
-			Vector3(cos(a1), sin(a1), 0) * 1.55, Vector3(cos(a1), sin(a1), 0) * (1.55 - 0.55 * w1),
-		]
-		for v in [p[0], p[1], p[2], p[2], p[1], p[3]]:
-			st.set_uv(Vector2(float(i) / seg, 0))
-			st.add_vertex(v)
 	_slash = MeshInstance3D.new()
-	_slash.mesh = st.commit()
+	_slash.mesh = ImmediateMesh.new()
 	_slash_mat = StandardMaterial3D.new()
 	_slash_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_slash_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_slash_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_slash_mat.albedo_color = Color(1.0, 0.97, 0.82, 0.0)
+	_slash_mat.vertex_color_use_as_albedo = true
 	_slash.material_override = _slash_mat
 	_slash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_slash.position = Vector3(0.1, 0.95, 0.35)
 	_slash.visible = false
 	add_child(_slash)
 
@@ -217,8 +197,7 @@ func _physics_process(delta: float) -> void:
 	_was_on_floor = is_on_floor()
 
 	visual.scale = visual.scale.lerp(Vector3.ONE, 1.0 - exp(-12.0 * delta))
-	if _attack_t <= 0.0:
-		_update_animation()
+	_update_animation()
 	_update_blob_shadow()
 	var target_rot := 0.0 if facing > 0.0 else PI
 	visual.rotation.y = lerp_angle(visual.rotation.y, target_rot, 1.0 - exp(-15.0 * delta))
@@ -243,28 +222,49 @@ func _start_attack() -> void:
 	_attack_t = ATTACK_TIME
 	_attack_cd = ATTACK_COOLDOWN
 	attack_id += 1
-	var ap: AnimationPlayer = visual.get_meta("anim", null)
-	if ap and ap.has_animation("attack-melee-right"):
-		ap.play("attack-melee-right", 0.05, 1.9)
-		ap.seek(0.0, true)
-	visual.scale = Vector3(1.15, 0.9, 1.15)
+	visual.scale = Vector3(1.08, 0.95, 1.08)
 
 
 func _update_slash() -> void:
 	if _attack_t <= 0.0:
 		_slash.visible = false
+		if _swing:
+			_swing.progress = -1.0
 		return
 	var k := 1.0 - _attack_t / ATTACK_TIME   # 0 → 1 durante o golpe
+	if _swing == null:
+		return
+	_swing.progress = k
+	var im: ImmediateMesh = _slash.mesh
+	im.clear_surfaces()
+	var from := maxf(SwordSwing.WIND_END + 0.03, k - 0.11)
+	var to := minf(k, SwordSwing.HIT_END + 0.04)
+	if to - from < 0.01:
+		_slash.visible = false
+		return
 	_slash.visible = true
-	_slash.scale = Vector3(facing, 1.0, 1.0) * lerpf(0.8, 1.1, k)
-	_slash.rotation.z = facing * lerpf(0.9, -0.5, k)
-	_slash.position.x = facing * 0.15
-	_slash_mat.albedo_color.a = 0.85 * (1.0 - k) * minf(1.0, k * 6.0)
+	_slash.scale = Vector3(facing, 1.0, 1.0)
+	var n := 14
+	im.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+	for i in n + 1:
+		var t := float(i) / n
+		var ang := deg_to_rad(_swing._arm_angle(lerpf(from, to, t)))
+		var hand := SLASH_SHOULDER + Vector3(sin(ang), -cos(ang), 0.0) * 0.56
+		var dir := Vector3(cos(ang), sin(ang), 0.0)   # lâmina = braço girado 90° para a frente
+		var col := Color(1.0, 0.97, 0.86, 0.55 * t * t)
+		im.surface_set_color(col)
+		im.surface_add_vertex(hand + dir * 0.55)
+		im.surface_set_color(col)
+		im.surface_add_vertex(hand + dir * 1.0)
+	im.surface_end()
 
 
 ## O golpe de espada está na janela em que acerta?
 func is_attacking() -> bool:
-	return _attack_t > ATTACK_TIME - ATTACK_ACTIVE
+	if _attack_t <= 0.0:
+		return false
+	var k := 1.0 - _attack_t / ATTACK_TIME
+	return k >= HIT_FROM and k <= HIT_TO
 
 
 ## O golpe atual alcança este ponto (na frente do personagem)?
